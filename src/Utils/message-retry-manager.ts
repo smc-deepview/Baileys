@@ -1,14 +1,11 @@
-import { LRUCache } from 'lru-cache'
 import type { proto } from '../../WAProto/index.js'
 import type { ILogger } from './logger'
-
-/** Number of sent messages to cache in memory for handling retry receipts */
-const RECENT_MESSAGES_SIZE = 512
+import NodeCache from '@cacheable/node-cache'
 
 const MESSAGE_KEY_SEPARATOR = '\u0000'
 
 /** Timeout for session recreation - 1 hour */
-const RECREATE_SESSION_TIMEOUT = 60 * 60 * 1000 // 1 hour in milliseconds
+const RECREATE_SESSION_TIMEOUT = 60 * 60 // 1 hour in seconds
 const PHONE_REQUEST_DELAY = 3000
 export interface RecentMessageKey {
 	to: string
@@ -63,27 +60,18 @@ export enum RetryReason {
 const MAC_ERROR_CODES = new Set([RetryReason.SignalErrorInvalidMessage, RetryReason.SignalErrorBadMac])
 
 export class MessageRetryManager {
-	private recentMessagesMap = new LRUCache<string, RecentMessage>({
-		max: RECENT_MESSAGES_SIZE,
-		ttl: 5 * 60 * 1000,
-		ttlAutopurge: true,
-		dispose: (_value: RecentMessage, key: string) => {
-			const separatorIndex = key.lastIndexOf(MESSAGE_KEY_SEPARATOR)
-			if (separatorIndex > -1) {
-				const messageId = key.slice(separatorIndex + MESSAGE_KEY_SEPARATOR.length)
-				this.messageKeyIndex.delete(messageId)
-			}
-		}
+	private recentMessagesMap = new NodeCache<RecentMessage>({
+		stdTTL: 5 * 60, // 5 minutes in seconds
+		useClones: false
 	})
 	private messageKeyIndex = new Map<string, string>()
-	private sessionRecreateHistory = new LRUCache<string, number>({
-		ttl: RECREATE_SESSION_TIMEOUT * 2,
-		ttlAutopurge: true
+	private sessionRecreateHistory = new NodeCache<number>({
+		stdTTL: RECREATE_SESSION_TIMEOUT * 2,
+		useClones: false
 	})
-	private retryCounters = new LRUCache<string, number>({
-		ttl: 15 * 60 * 1000,
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+	private retryCounters = new NodeCache<number>({
+		stdTTL: 15 * 60,
+		useClones: false
 	}) // 15 minutes TTL
 	private pendingPhoneRequests: PendingPhoneRequest = {}
 	private readonly maxMsgRetryCount: number = 5
@@ -143,7 +131,7 @@ export class MessageRetryManager {
 			this.sessionRecreateHistory.set(jid, Date.now())
 			this.statistics.sessionRecreations++
 			return {
-				reason: "we don't have a Signal session with them",
+				reason: "we don't have a session with them",
 				recreate: true
 			}
 		}
@@ -236,7 +224,7 @@ export class MessageRetryManager {
 	markRetrySuccess(messageId: string): void {
 		this.statistics.successfulRetries++
 		// Clean up retry counter for successful message
-		this.retryCounters.delete(messageId)
+		this.retryCounters.del(messageId)
 		this.cancelPendingPhoneRequest(messageId)
 		this.removeRecentMessage(messageId)
 	}
@@ -246,7 +234,7 @@ export class MessageRetryManager {
 	 */
 	markRetryFailed(messageId: string): void {
 		this.statistics.failedRetries++
-		this.retryCounters.delete(messageId)
+		this.retryCounters.del(messageId)
 		this.cancelPendingPhoneRequest(messageId)
 		this.removeRecentMessage(messageId)
 	}
@@ -289,7 +277,7 @@ export class MessageRetryManager {
 			return
 		}
 
-		this.recentMessagesMap.delete(keyStr)
+		this.recentMessagesMap.del(keyStr)
 		this.messageKeyIndex.delete(messageId)
 	}
 }
