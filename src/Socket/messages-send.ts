@@ -109,10 +109,17 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		config.userDevicesCache ||
 		new NodeCache<JidWithDevice[]>({
 			stdTTL: DEFAULT_CACHE_TTLS.USER_DEVICES, // 5 minutes
-			useClones: false
+			useClones: false,
+			max: 5000 // Limit to 5k user device entries to prevent memory leak
 		})
 	/** Serializes writes to userDevicesCache across USync refresh and device-notification handling. */
 	const devicesMutex = makeMutex()
+
+	const peerSessionsCache = new NodeCache<boolean>({
+		stdTTL: DEFAULT_CACHE_TTLS.USER_DEVICES,
+		useClones: false,
+		max: 5000 // Limit to 5k peer session entries to prevent memory leak
+	})
 
 	// Initialize message retry manager if enabled
 	const messageRetryManager = enableRecentMessageCache ? new MessageRetryManager(logger, maxMsgRetryCount) : null
