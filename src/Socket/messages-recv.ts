@@ -1414,10 +1414,19 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		let shouldRecreateSession = false
 		let recreateReason = ''
 
-		if (enableAutoSessionRecreation && messageRetryManager && retryCount > 1 && !injectedFromBundle) {
+		// Parse error code from retry receipt (indicates why decryption failed)
+		const errorCode = messageRetryManager?.parseRetryErrorCode(retryNode.attrs.error)
+		if (errorCode !== undefined) {
+			logger.debug({ participant, errorCode, retryCount }, 'retry receipt contains error code')
+		}
+
+		// Check session recreation if: retryCount > 1 OR we have a MAC error (immediate recreation needed).
+		// Skip when the session was just injected from a bundle — upstream's 1b16859 guard.
+		const hasMacError = errorCode !== undefined && messageRetryManager?.isMacError(errorCode)
+		if (enableAutoSessionRecreation && messageRetryManager && (retryCount > 1 || hasMacError) && !injectedFromBundle) {
 			try {
 				const hasSession = await signalRepository.validateSession(participant)
-				const result = messageRetryManager.shouldRecreateSession(participant, hasSession.exists)
+				const result = messageRetryManager.shouldRecreateSession(participant, hasSession.exists, errorCode)
 				shouldRecreateSession = result.recreate
 				recreateReason = result.reason
 
