@@ -135,7 +135,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		(new NodeCache<number>({
 			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 1 hour
 			useClones: false,
-			max: 5000 // Limit to 5k placeholder entries to prevent memory leak
+			maxKeys: 5000 // Limit to 5k placeholder entries to prevent memory leak
 		}) as CacheStore)
 
 	/** helper function to fetch the given app state sync key */
