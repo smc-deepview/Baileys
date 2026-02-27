@@ -73,6 +73,12 @@ export function makeLibSignalRepository(
 		return { senderName, skdm }
 	}
 
+	// Cache for recent migration attempts to deduplicate burst calls
+	const recentMigrationAttempts = new NodeCache<true>({
+		stdTTL: 60, // 1 minute - just to dedupe bursts
+		useClones: false
+	})
+
 	/**
 	 * Resolve a JID to its canonical (LID-preferred) form for use as transaction lock key.
 	 * This prevents race conditions where PN and LID JIDs for the same contact
@@ -295,6 +301,19 @@ export function makeLibSignalRepository(
 				return { migrated: 0, skipped: 0, total: 1 }
 			}
 
+			// Early exit for duplicate migration attempts within short window
+			const fromUser = jidDecode(fromJid)?.user
+			const toUser = jidDecode(toJid)?.user
+			if (fromUser && toUser) {
+				const migrationKey = `${fromUser}:${toUser}`
+				if (recentMigrationAttempts.has(migrationKey)) {
+					logger.trace({ fromJid, toJid }, 'skipping duplicate migration attempt')
+					return { migrated: 0, skipped: 0, total: 0 }
+				}
+
+				recentMigrationAttempts.set(migrationKey, true)
+			}
+
 			const { user } = jidDecode(fromJid)!
 
 			logger.debug({ fromJid }, 'bulk device migration - loading all user devices')
@@ -479,7 +498,7 @@ function ensurePreKeyCleanup() {
 		const now = Date.now()
 		for(const [key, entry] of pendingPreKeyDeletions) {
 			if(now >= entry.expiry) {
-				entry.keys.set({ 'pre-key': { [entry.id]: null } })
+				void entry.keys.set({ 'pre-key': { [entry.id]: null } })
 				pendingPreKeyDeletions.delete(key)
 			}
 		}
