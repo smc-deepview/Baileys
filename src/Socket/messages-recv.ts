@@ -1416,9 +1416,21 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 		// Parse error code from retry receipt (indicates why decryption failed)
 		const errorCode = messageRetryManager?.parseRetryErrorCode(retryNode.attrs.error)
-		if (errorCode !== undefined) {
-			logger.debug({ participant, errorCode, retryCount }, 'retry receipt contains error code')
-		}
+		const consecutiveFailures = messageRetryManager?.getConsecutiveFailureCount(participant) || 0
+
+		// Enhanced logging for retry debugging
+		logger.info(
+			{
+				participant,
+				messageIds: ids,
+				retryCount,
+				errorCode: errorCode !== undefined ? { code: errorCode, name: retryNode.attrs.error } : undefined,
+				consecutiveFailures,
+				remoteJid: key.remoteJid,
+				retryNodeAttrs: retryNode.attrs
+			},
+			'sendMessagesAgain: processing outgoing retry'
+		)
 
 		// Check session recreation if: retryCount > 1 OR we have a MAC error (immediate recreation needed).
 		// Skip when the session was just injected from a bundle — upstream's 1b16859 guard.
@@ -1538,23 +1550,87 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 						// correctly set who is asking for the retry
 						key.participant = key.participant || attrs.from
 						const retryNode = getBinaryNodeChild(node, 'retry')
+
+						// Enhanced logging for retry investigation
+						const retryErrorCode = retryNode?.attrs?.error
+						const retryCount = retryNode?.attrs?.count
+						logger.debug(
+							{
+								messageId: ids[0],
+								participant: key.participant,
+								errorCode: retryErrorCode,
+								retryCount,
+								fromMe: key.fromMe,
+								remoteJid: key.remoteJid
+							},
+							'processing retry receipt'
+						)
+
 						if (ids[0] && key.participant && (await willSendMessageAgain(ids[0], key.participant))) {
 							if (key.fromMe) {
 								try {
 									await updateSendMessageAgainCount(ids[0], key.participant)
 									logger.debug({ attrs, key }, 'recv retry request')
 									await sendMessagesAgain(key, ids, retryNode!, node)
+									// Clear consecutive failures on successful retry send
+									if (messageRetryManager) {
+										messageRetryManager.clearConsecutiveFailures(key.participant)
+									}
 								} catch (error: unknown) {
 									logger.error(
 										{ key, ids, trace: error instanceof Error ? error.stack : 'Unknown error' },
 										'error in sending message again'
 									)
+									// Record failure for Option C tracking
+									const failedMsgId = ids[0]
+									if (messageRetryManager && key.participant && failedMsgId) {
+										messageRetryManager.recordRetryFailure(key.participant, failedMsgId)
+									}
 								}
 							} else {
 								logger.info({ attrs, key }, 'recv retry for not fromMe message')
 							}
 						} else {
-							logger.info({ attrs, key }, 'will not send message again, as sent too many times')
+							// Option C: Track consecutive failures and potentially trigger session recreation
+							const participant = key.participant
+							logger.warn(
+								{
+									messageId: ids[0],
+									participant,
+									errorCode: retryErrorCode,
+									retryCount,
+									remoteJid: key.remoteJid
+								},
+								'will not send message again, retry limit reached'
+							)
+
+							const messageId = ids[0]
+							if (messageRetryManager && participant && messageId) {
+								// Mark the message retry as failed
+								messageRetryManager.markRetryFailed(messageId)
+
+								// Record consecutive failure and check if we should recreate session
+								const failureResult = messageRetryManager.recordRetryFailure(participant, messageId)
+								if (failureResult.shouldRecreate && enableAutoSessionRecreation) {
+									try {
+										const sessionId = signalRepository.jidToSignalProtocolAddress(participant)
+										logger.warn(
+											{
+												participant,
+												consecutiveFailures: failureResult.consecutiveCount,
+												reason: failureResult.reason
+											},
+											'recreating session due to consecutive failures (Option C)'
+										)
+										await authState.keys.set({ session: { [sessionId]: null } })
+									} catch (error) {
+										logger.error(
+											{ error, participant },
+											'failed to recreate session for consecutive failures'
+										)
+									}
+								}
+							}
 						}
 					}
 				})

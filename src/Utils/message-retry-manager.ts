@@ -7,6 +7,10 @@ const MESSAGE_KEY_SEPARATOR = '\u0000'
 /** Timeout for session recreation - 1 hour */
 const RECREATE_SESSION_TIMEOUT = 60 * 60 // 1 hour in seconds
 const PHONE_REQUEST_DELAY = 3000
+/** Default threshold for consecutive failures before forcing session recreation */
+const DEFAULT_CONSECUTIVE_FAILURE_THRESHOLD = 3
+/** TTL for consecutive failure tracking - 30 minutes */
+const CONSECUTIVE_FAILURE_TTL = 30 * 60
 export interface RecentMessageKey {
 	to: string
 	id: string
@@ -34,6 +38,13 @@ export interface RetryStatistics {
 	mediaRetries: number
 	sessionRecreations: number
 	phoneRequests: number
+	consecutiveFailureRecreations: number
+}
+
+export interface ConsecutiveFailureInfo {
+	count: number
+	lastMessageId: string
+	firstFailureTime: number
 }
 
 // Retry reason codes matching WhatsApp Web's Signal error codes.
@@ -73,20 +84,26 @@ export class MessageRetryManager {
 		stdTTL: 15 * 60,
 		useClones: false
 	}) // 15 minutes TTL
-	private baseKeys = new LRUCache<string, Uint8Array>({
-		max: 1024,
-		ttl: 15 * 60 * 1000,
-		ttlAutopurge: true
+	private baseKeys = new NodeCache<Uint8Array>({
+		stdTTL: 15 * 60, // 15 min — matches upstream's LRUCache ttl
+		maxKeys: 1024,
+		useClones: false
+	})
+	private consecutiveFailures = new NodeCache<ConsecutiveFailureInfo>({
+		stdTTL: CONSECUTIVE_FAILURE_TTL,
+		useClones: false
 	})
 	private pendingPhoneRequests: PendingPhoneRequest = {}
 	private readonly maxMsgRetryCount: number = 5
+	private readonly consecutiveFailureThreshold: number = DEFAULT_CONSECUTIVE_FAILURE_THRESHOLD
 	private statistics: RetryStatistics = {
 		totalRetries: 0,
 		successfulRetries: 0,
 		failedRetries: 0,
 		mediaRetries: 0,
 		sessionRecreations: 0,
-		phoneRequests: 0
+		phoneRequests: 0,
+		consecutiveFailureRecreations: 0
 	}
 
 	constructor(
@@ -131,10 +148,27 @@ export class MessageRetryManager {
 		hasSession: boolean,
 		errorCode?: RetryReason
 	): { reason: string; recreate: boolean } {
+		const consecutiveCount = this.getConsecutiveFailureCount(jid)
+		const prevTime = this.sessionRecreateHistory.get(jid)
+		const timeSinceLastRecreation = prevTime ? Date.now() - prevTime : undefined
+
+		this.logger.debug(
+			{
+				jid,
+				hasSession,
+				errorCode: errorCode !== undefined ? RetryReason[errorCode] : undefined,
+				consecutiveFailures: consecutiveCount,
+				lastRecreation: prevTime ? new Date(prevTime).toISOString() : 'never',
+				timeSinceLastRecreationMs: timeSinceLastRecreation
+			},
+			'evaluating session recreation'
+		)
+
 		// If we don't have a session, always recreate
 		if (!hasSession) {
 			this.sessionRecreateHistory.set(jid, Date.now())
 			this.statistics.sessionRecreations++
+			this.logger.info({ jid }, 'recreating session: no existing session')
 			return {
 				reason: "we don't have a session with them",
 				recreate: true
@@ -156,18 +190,25 @@ export class MessageRetryManager {
 		}
 
 		const now = Date.now()
-		const prevTime = this.sessionRecreateHistory.get(jid)
 
 		// If no previous recreation or it's been more than an hour
-		if (!prevTime || now - prevTime > RECREATE_SESSION_TIMEOUT) {
+		if (!prevTime || now - prevTime > RECREATE_SESSION_TIMEOUT * 1000) {
 			this.sessionRecreateHistory.set(jid, now)
 			this.statistics.sessionRecreations++
+			this.logger.info(
+				{ jid, timeSinceLastMs: prevTime ? now - prevTime : 'never' },
+				'recreating session: timeout exceeded since last recreation'
+			)
 			return {
 				reason: 'retry count > 1 and over an hour since last recreation',
 				recreate: true
 			}
 		}
 
+		this.logger.debug(
+			{ jid, timeSinceLastRecreationMs: timeSinceLastRecreation, timeoutMs: RECREATE_SESSION_TIMEOUT * 1000 },
+			'not recreating session: within timeout window'
+		)
 		return { reason: '', recreate: false }
 	}
 
@@ -198,6 +239,79 @@ export class MessageRetryManager {
 	 */
 	isMacError(errorCode: RetryReason | undefined): boolean {
 		return errorCode !== undefined && MAC_ERROR_CODES.has(errorCode)
+	}
+
+	/**
+	 * Record a retry failure for a JID and check if consecutive failure threshold is reached.
+	 * Option C: Track consecutive failures per participant to detect persistent session issues.
+	 * @returns true if threshold reached and session should be recreated
+	 */
+	recordRetryFailure(jid: string, messageId: string): {
+		shouldRecreate: boolean
+		consecutiveCount: number
+		reason: string
+	} {
+		const existing = this.consecutiveFailures.get(jid)
+		const now = Date.now()
+
+		if (existing) {
+			existing.count++
+			existing.lastMessageId = messageId
+			this.consecutiveFailures.set(jid, existing)
+
+			if (existing.count >= this.consecutiveFailureThreshold) {
+				this.logger.warn(
+					{
+						jid,
+						consecutiveCount: existing.count,
+						threshold: this.consecutiveFailureThreshold,
+						firstFailure: new Date(existing.firstFailureTime).toISOString(),
+						messageId
+					},
+					'consecutive failure threshold reached, forcing session recreation'
+				)
+				// Reset after triggering recreation
+				this.consecutiveFailures.del(jid)
+				this.statistics.consecutiveFailureRecreations++
+				return {
+					shouldRecreate: true,
+					consecutiveCount: existing.count,
+					reason: `${existing.count} consecutive failures (threshold: ${this.consecutiveFailureThreshold})`
+				}
+			}
+
+			this.logger.debug(
+				{ jid, consecutiveCount: existing.count, threshold: this.consecutiveFailureThreshold, messageId },
+				'recorded consecutive retry failure'
+			)
+			return { shouldRecreate: false, consecutiveCount: existing.count, reason: '' }
+		}
+
+		// First failure for this JID
+		this.consecutiveFailures.set(jid, {
+			count: 1,
+			lastMessageId: messageId,
+			firstFailureTime: now
+		})
+		this.logger.debug({ jid, messageId }, 'recorded first retry failure for participant')
+		return { shouldRecreate: false, consecutiveCount: 1, reason: '' }
+	}
+
+	/**
+	 * Clear consecutive failure tracking for a JID (call on success)
+	 */
+	clearConsecutiveFailures(jid: string): void {
+		if (this.consecutiveFailures.has(jid)) {
+			this.logger.debug({ jid }, 'clearing consecutive failure counter on success')
+			this.consecutiveFailures.del(jid)
+		}
+	}
+
+	/**
+	 * Get current consecutive failure count for a JID
+	 */
+	getConsecutiveFailureCount(jid: string): number {
+		return this.consecutiveFailures.get(jid)?.count || 0
 	}
 
 	/**
@@ -278,6 +392,7 @@ export class MessageRetryManager {
 		this.sessionRecreateHistory.clear()
 		this.retryCounters.clear()
 		this.baseKeys.clear()
+		this.consecutiveFailures.clear()
 		for (const messageId of Object.keys(this.pendingPhoneRequests)) {
 			this.cancelPendingPhoneRequest(messageId)
 		}
@@ -288,7 +403,8 @@ export class MessageRetryManager {
 			failedRetries: 0,
 			mediaRetries: 0,
 			sessionRecreations: 0,
-			phoneRequests: 0
+			phoneRequests: 0,
+			consecutiveFailureRecreations: 0
 		}
 	}
 
@@ -310,7 +426,7 @@ export class MessageRetryManager {
 	}
 
 	deleteBaseKey(addr: string, msgId: string): void {
-		this.baseKeys.delete(`${addr}:${msgId}`)
+		this.baseKeys.del(`${addr}:${msgId}`)
 	}
 
 	private keyToString(key: RecentMessageKey): string {
@@ -325,5 +441,31 @@ export class MessageRetryManager {
 
 		this.recentMessagesMap.del(keyStr)
 		this.messageKeyIndex.delete(messageId)
+	}
+
+	/**
+	 * Get retry statistics for monitoring/metrics
+	 */
+	getStatistics(): RetryStatistics {
+		return { ...this.statistics }
+	}
+
+	/**
+	 * Get current cache sizes for debugging
+	 */
+	getCacheSizes(): {
+		recentMessages: number
+		retryCounters: number
+		sessionRecreateHistory: number
+		consecutiveFailures: number
+		pendingPhoneRequests: number
+	} {
+		return {
+			recentMessages: this.recentMessagesMap.keys().length,
+			retryCounters: this.retryCounters.keys().length,
+			sessionRecreateHistory: this.sessionRecreateHistory.keys().length,
+			consecutiveFailures: this.consecutiveFailures.keys().length,
+			pendingPhoneRequests: Object.keys(this.pendingPhoneRequests).length
+		}
 	}
 }

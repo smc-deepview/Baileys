@@ -6,7 +6,8 @@ import NodeCache from '@cacheable/node-cache'
 export class LIDMappingStore {
 	private readonly mappingCache = new NodeCache<string>({
 		stdTTL: 60 * 60, //1h
-		useClones: false
+		useClones: false,
+		maxKeys: 10000 // Limit to 10k LID mappings to prevent memory growth
 	})
 	private readonly keys: SignalKeyStoreWithTransaction
 	private readonly logger: ILogger
