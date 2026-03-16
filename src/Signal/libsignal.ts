@@ -58,13 +58,15 @@ export function makeLibSignalRepository(
 	const parsedKeys = auth.keys as SignalKeyStoreWithTransaction
 	const migratedSessionCache = new NodeCache<true>({
 		stdTTL: 60 * 60, //1h
-		useClones: false
+		useClones: false,
+		maxKeys: 5000 // Limit migrated session tracking
 	})
 
 	// Cache for recent migration attempts to deduplicate burst calls
 	const recentMigrationAttempts = new NodeCache<true>({
 		stdTTL: 60, // 1 minute - just to dedupe bursts
-		useClones: false
+		useClones: false,
+		maxKeys: 1000
 	})
 
 	/**

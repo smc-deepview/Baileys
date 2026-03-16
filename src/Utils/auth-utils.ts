@@ -44,7 +44,7 @@ export function makeCacheableSignalKeyStore(
 			stdTTL: DEFAULT_CACHE_TTLS.SIGNAL_STORE, // 5 minutes
 			useClones: false,
 			deleteOnExpire: true,
-			maxKeys: 10000 // Limit to 10k signal store entries to prevent memory leak
+			maxKeys: 3000 // Limit signal store entries per user to reduce memory footprint
 		})
 
 	// Mutex for protecting cache operations
