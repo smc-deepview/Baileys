@@ -333,9 +333,11 @@ export class LIDMappingStore {
 	}
 
 	/**
-	 * Close the cache and release resources
+	 * Close the cache and release resources.
+	 * Uses NodeCache.close() to release the check-period setInterval;
+	 * .clear()/.flushAll() would leak the timer.
 	 */
 	close(): void {
-		this.mappingCache.clear()
+		this.mappingCache.close()
 	}
 }

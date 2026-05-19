@@ -1,5 +1,6 @@
 import type { proto } from '../../WAProto/index.js'
 import type { ILogger } from './logger'
+import { LRUCache } from 'lru-cache'
 import NodeCache from '@cacheable/node-cache'
 
 const MESSAGE_KEY_SEPARATOR = '\u0000'
@@ -70,6 +71,11 @@ export enum RetryReason {
 /** Error codes that indicate a MAC failure and require immediate session recreation */
 const MAC_ERROR_CODES = new Set([RetryReason.SignalErrorInvalidMessage, RetryReason.SignalErrorBadMac])
 
+/** All explicitly-named RetryReason values; used to validate inbound error codes. */
+const KNOWN_RETRY_REASONS: ReadonlySet<number> = new Set(
+	Object.values(RetryReason).filter((v): v is number => typeof v === 'number')
+)
+
 export class MessageRetryManager {
 	private recentMessagesMap = new NodeCache<RecentMessage>({
 		stdTTL: 5 * 60, // 5 minutes in seconds
@@ -84,10 +90,14 @@ export class MessageRetryManager {
 		stdTTL: 15 * 60,
 		useClones: false
 	}) // 15 minutes TTL
-	private baseKeys = new NodeCache<Uint8Array>({
-		stdTTL: 15 * 60, // 15 min — matches upstream's LRUCache ttl
-		maxKeys: 1024,
-		useClones: false
+	// LRUCache (not NodeCache) on purpose: under burst, LRUCache evicts the
+	// least-recently-used entry to make room; NodeCache.maxKeys would REFUSE
+	// new inserts past the cap, silently breaking the base-key collision
+	// check that upstream #2506 relies on for session reset.
+	private baseKeys = new LRUCache<string, Uint8Array>({
+		max: 1024,
+		ttl: 15 * 60 * 1000,
+		ttlAutopurge: true
 	})
 	private consecutiveFailures = new NodeCache<ConsecutiveFailureInfo>({
 		stdTTL: CONSECUTIVE_FAILURE_TTL,
@@ -214,7 +224,9 @@ export class MessageRetryManager {
 
 	/**
 	 * Parse error code from retry receipt's retry node.
-	 * Returns undefined if no error code is present.
+	 * Returns undefined if no error code is present, RetryReason.UnknownError
+	 * if the code is present but doesn't match a named enum value (e.g. a
+	 * new code WhatsApp added that we haven't mapped yet).
 	 */
 	parseRetryErrorCode(errorAttr: string | undefined): RetryReason | undefined {
 		if (errorAttr === undefined || errorAttr === '') {
@@ -226,8 +238,9 @@ export class MessageRetryManager {
 			return undefined
 		}
 
-		// Validate it's a known RetryReason
-		if (code >= RetryReason.UnknownError && code <= RetryReason.StatusRevokeDelay) {
+		// Explicit set-membership check rather than a numeric range:
+		// the enum is not guaranteed to stay contiguous as WhatsApp adds codes.
+		if (KNOWN_RETRY_REASONS.has(code)) {
 			return code as RetryReason
 		}
 
@@ -386,13 +399,19 @@ export class MessageRetryManager {
 		}
 	}
 
+	/**
+	 * Called from `registerSocketEndHandler` when the socket dies.
+	 * Uses NodeCache.close() to release internal setInterval timers
+	 * (one per NodeCache). LRUCache and Map use .clear() since they
+	 * carry no timers.
+	 */
 	clear(): void {
-		this.recentMessagesMap.clear()
+		this.recentMessagesMap.close()
 		this.messageKeyIndex.clear()
-		this.sessionRecreateHistory.clear()
-		this.retryCounters.clear()
+		this.sessionRecreateHistory.close()
+		this.retryCounters.close()
 		this.baseKeys.clear()
-		this.consecutiveFailures.clear()
+		this.consecutiveFailures.close()
 		for (const messageId of Object.keys(this.pendingPhoneRequests)) {
 			this.cancelPendingPhoneRequest(messageId)
 		}
@@ -426,7 +445,7 @@ export class MessageRetryManager {
 	}
 
 	deleteBaseKey(addr: string, msgId: string): void {
-		this.baseKeys.del(`${addr}:${msgId}`)
+		this.baseKeys.delete(`${addr}:${msgId}`)
 	}
 
 	private keyToString(key: RecentMessageKey): string {

@@ -1432,10 +1432,24 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			'sendMessagesAgain: processing outgoing retry'
 		)
 
-		// Check session recreation if: retryCount > 1 OR we have a MAC error (immediate recreation needed).
-		// Skip when the session was just injected from a bundle — upstream's 1b16859 guard.
 		const hasMacError = errorCode !== undefined && messageRetryManager?.isMacError(errorCode)
-		if (enableAutoSessionRecreation && messageRetryManager && (retryCount > 1 || hasMacError) && !injectedFromBundle) {
+
+		// Explicit session-recreation gate.
+		//
+		// (1) `!injectedFromBundle` — if upstream's #2506 path just injected
+		//     a fresh session from a retry-receipt key bundle, that bundle
+		//     IS the recreation. Running our own recreation on top would
+		//     discard the freshly-injected keys.
+		// (2) `(retryCount > 1 || hasMacError)` — dv's MAC-error broadening
+		//     (commit 863aa31c): a MAC error is a definitive "session is
+		//     out of sync" signal, so fire immediately rather than waiting
+		//     for the second retry.
+		if (
+			enableAutoSessionRecreation &&
+			messageRetryManager &&
+			!injectedFromBundle &&
+			(retryCount > 1 || hasMacError)
+		) {
 			try {
 				const hasSession = await signalRepository.validateSession(participant)
 				const result = messageRetryManager.shouldRecreateSession(participant, hasSession.exists, errorCode)

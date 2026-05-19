@@ -287,8 +287,14 @@ export function makeLibSignalRepository(
 		},
 
 		close() {
-			migratedSessionCache.clear()
+			// .close() releases NodeCache's internal check-period setInterval.
+			// .clear()/.flushAll() only drop entries — the timer would leak,
+			// accumulating one zombie timer per closed socket.
+			migratedSessionCache.close()
+			recentMigrationAttempts.close()
 			lidMapping.close()
+			// Releases the per-storage pre-key cleanup interval timer.
+			storage.closePreKeyCleanup()
 		},
 
 		async migrateSession(
@@ -487,35 +493,6 @@ const jidToSignalSenderKeyName = (group: string, user: string): SenderKeyName =>
  */
 const PREKEY_GRACE_PERIOD_MS = 5 * 60 * 1000 // 5 minutes
 const PREKEY_CLEANUP_INTERVAL_MS = 60_000 // 1 minute
-const pendingPreKeyDeletions = new Map<string, { id: number, expiry: number, keys: SignalAuthState['keys'] }>()
-
-let preKeyCleanupTimer: ReturnType<typeof setInterval> | undefined
-
-function ensurePreKeyCleanup() {
-	if(preKeyCleanupTimer) {
-		return
-	}
-
-	preKeyCleanupTimer = setInterval(() => {
-		const now = Date.now()
-		for(const [key, entry] of pendingPreKeyDeletions) {
-			if(now >= entry.expiry) {
-				void entry.keys.set({ 'pre-key': { [entry.id]: null } })
-				pendingPreKeyDeletions.delete(key)
-			}
-		}
-
-		if(pendingPreKeyDeletions.size === 0 && preKeyCleanupTimer) {
-			clearInterval(preKeyCleanupTimer)
-			preKeyCleanupTimer = undefined
-		}
-	}, PREKEY_CLEANUP_INTERVAL_MS)
-
-	// Don't block process exit
-	if(preKeyCleanupTimer && typeof preKeyCleanupTimer === 'object' && 'unref' in preKeyCleanupTimer) {
-		preKeyCleanupTimer.unref()
-	}
-}
 
 function signalStorage(
 	{ creds, keys }: SignalAuthState,
@@ -524,7 +501,54 @@ function signalStorage(
 	libsignal.SignalStorage & {
 		loadIdentityKey(id: string): Promise<Uint8Array | undefined>
 		saveIdentity(id: string, identityKey: Uint8Array): Promise<boolean>
+		closePreKeyCleanup(): void
 	} {
+	// Per-storage (= per-user) pre-key deletion state.
+	// Module-level state would collide across tenants: pre-key IDs are not
+	// globally unique, so two users with overlapping IDs would have
+	// `pendingPreKeyDeletions` overwrite each other's entries.
+	const pendingPreKeyDeletions = new Map<string, { id: number; expiry: number }>()
+	let preKeyCleanupTimer: ReturnType<typeof setInterval> | undefined
+
+	const ensurePreKeyCleanup = () => {
+		if (preKeyCleanupTimer) {
+			return
+		}
+
+		preKeyCleanupTimer = setInterval(() => {
+			const now = Date.now()
+			for (const [k, entry] of pendingPreKeyDeletions) {
+				if (now >= entry.expiry) {
+					void keys.set({ 'pre-key': { [entry.id]: null } })
+					pendingPreKeyDeletions.delete(k)
+				}
+			}
+
+			if (pendingPreKeyDeletions.size === 0 && preKeyCleanupTimer) {
+				clearInterval(preKeyCleanupTimer)
+				preKeyCleanupTimer = undefined
+			}
+		}, PREKEY_CLEANUP_INTERVAL_MS)
+
+		// Don't block process exit
+		if (preKeyCleanupTimer && typeof preKeyCleanupTimer === 'object' && 'unref' in preKeyCleanupTimer) {
+			preKeyCleanupTimer.unref()
+		}
+	}
+
+	const closePreKeyCleanup = (): void => {
+		if (preKeyCleanupTimer) {
+			clearInterval(preKeyCleanupTimer)
+			preKeyCleanupTimer = undefined
+		}
+
+		// Best-effort flush of pending deletions on shutdown.
+		for (const [k, entry] of pendingPreKeyDeletions) {
+			void keys.set({ 'pre-key': { [entry.id]: null } })
+			pendingPreKeyDeletions.delete(k)
+		}
+	}
+
 	// Shared function to resolve PN signal address to LID if mapping exists
 	const resolveLIDSignalAddress = async (id: string): Promise<string> => {
 		if (id.includes('.')) {
@@ -610,10 +634,10 @@ function signalStorage(
 		removePreKey: (id: number) => {
 			// Delay pre-key deletion so retransmissions using the same
 			// pre-key ID can still decrypt during the grace period.
-			const key = `${id}`
-			pendingPreKeyDeletions.set(key, { id, expiry: Date.now() + PREKEY_GRACE_PERIOD_MS, keys })
+			pendingPreKeyDeletions.set(`${id}`, { id, expiry: Date.now() + PREKEY_GRACE_PERIOD_MS })
 			ensurePreKeyCleanup()
 		},
+		closePreKeyCleanup,
 		loadSignedPreKey: () => {
 			const key = creds.signedPreKey
 			return {
