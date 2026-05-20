@@ -454,7 +454,17 @@ export function trimUndefined(obj: { [_: string]: any }) {
 	return obj
 }
 
-const CROCKFORD_CHARACTERS = '123456789ABCDEFGHJKLMNPQRSTVWXYZ'
+// Standard Crockford Base32 alphabet — excludes I, L, O, U (visually
+// ambiguous with 1, 1, 0, V). WhatsApp's iPhone client validates
+// pair codes against this canonical alphabet, normalizing any typed
+// L → 1 and 0 → O per Crockford's convention. The upstream baileys
+// alphabet incorrectly included L and excluded 0, so any generated
+// code containing L would fail validation: the iPhone normalized
+// it to 1, deriving a different PBKDF2 key than baileys had used to
+// encrypt the wrapped ephemeral, producing "code is invalid". This
+// was the silent bug behind every "pair-code rejected on iPhone"
+// report we hit during the 2026-05-20 UAT smoke.
+const CROCKFORD_CHARACTERS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 export function bytesToCrockford(buffer: Buffer): string {
 	let value = 0
