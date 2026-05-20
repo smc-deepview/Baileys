@@ -47,14 +47,20 @@ jobs:
       - name: Install Dependencies
         run: yarn install --immutable
 
-      - name: Publish in NPM (as `baileys`)
-        run: npm publish --access public --provenance --tag latest
+      - name: Publish in NPM (as `dv-baileys`)
+        # Token-based publish. The upstream-inherited --provenance flag
+        # requires npm Trusted Publisher configuration mapping this
+        # repo+workflow path to the dv-baileys package, which is not
+        # set up on the dv fork — it fails E404. Token-based publish
+        # uses the NPM_TOKEN repo secret and works on any package the
+        # token has write access to.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag latest
 
-      - name: Publish in NPM (whiskeysockets scope)
-        run: |
-          npx json -I -f package.json -e "this.name='@whiskeysockets/baileys'"
-          npm publish --access public --provenance --tag latest
-          npx json -I -f package.json -e "this.name='baileys'"
+      # The @whiskeysockets/baileys publish step is intentionally
+      # omitted on the dv fork — we don't own that scope and the
+      # rename+publish would always fail E404 here.
 
       - name: Generate Changelog
         id: generate_changelog
