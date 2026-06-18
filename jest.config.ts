@@ -15,6 +15,7 @@ const config: Config = {
 			'ts-jest',
 			{
 				useESM: true,
+				isolatedModules: true,
 				tsconfig: {
 					module: 'esnext',
 					allowJs: true,
@@ -27,6 +28,7 @@ const config: Config = {
 			'ts-jest',
 			{
 				useESM: true,
+				isolatedModules: true,
 				tsconfig: {
 					module: 'esnext',
 					allowJs: true,

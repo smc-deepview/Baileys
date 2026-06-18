@@ -31,6 +31,7 @@ import {
 	jidNormalizedUser
 } from '../WABinary'
 import { aesDecryptGCM, hmacSign } from './crypto'
+import { decryptMessageEdit, MESSAGE_EDIT_LABELS } from './secret-edit'
 import { getKeyAuthor, toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
 import type { ILogger } from './logger'
@@ -623,6 +624,67 @@ const processMessage = async (
 			}
 		} else {
 			logger?.warn({ creationMsgKey }, 'event creation message not found, cannot decrypt response')
+		}
+	} else if (
+		content?.secretEncryptedMessage?.secretEncType ===
+		proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
+	) {
+		// WhatsApp can deliver a message edit as an encrypted `secretEncryptedMessage`.
+		// Decrypt with the ORIGINAL (target) message's messageSecret and re-emit it as
+		// the legacy `messages.update` edit shape so existing edit handling applies.
+		const sec = content.secretEncryptedMessage
+		const targetKey = sec.targetMessageKey
+		if (targetKey?.id) {
+			const targetMsg = await getMessage(targetKey)
+			if (!targetMsg) {
+				logger?.warn({ targetKey }, 'secret message edit: target message not found, cannot decrypt')
+			} else {
+				try {
+					const meIdNormalised = jidNormalizedUser(meId)
+					const creatorKey = targetKey.participant || targetKey.remoteJid!
+					const creatorPn = isLidUser(creatorKey)
+						? await signalRepository.lidMapping.getPNForLID(creatorKey)
+						: creatorKey
+					const editCreatorJid = getKeyAuthor(
+						{ remoteJid: jidNormalizedUser(creatorPn!), fromMe: meIdNormalised === creatorPn },
+						meIdNormalised
+					)
+					const editorJid = getKeyAuthor(message.key, meIdNormalised)
+					const editEncKey = targetMsg?.messageContextInfo?.messageSecret
+					if (!editEncKey) {
+						logger?.warn({ targetKey }, 'secret message edit: missing messageSecret for decryption')
+					} else {
+						const res = decryptMessageEdit(sec, {
+							editEncKey,
+							editCreatorJid,
+							editMsgId: targetKey.id,
+							editorJid
+						})
+						if (!res) {
+							logger?.warn(
+								{ targetKey, triedLabels: MESSAGE_EDIT_LABELS },
+								'secret message edit: no label candidate authenticated; scheme needs revision'
+							)
+						} else {
+							logger?.info(
+								{ targetKey, label: res.label },
+								'secret message edit: decrypted, emitting messages.update'
+							)
+							ev.emit('messages.update', [
+								{
+									key: { ...message.key, id: targetKey.id },
+									update: {
+										message: { editedMessage: { message: res.message } },
+										messageTimestamp: message.messageTimestamp
+									}
+								}
+							])
+						}
+					}
+				} catch (err) {
+					logger?.warn({ err, targetKey }, 'failed to decrypt secret message edit')
+				}
+			}
 		}
 	} else if (message.messageStubType) {
 		const jid = message.key?.remoteJid!
