@@ -31,7 +31,7 @@ import {
 	jidNormalizedUser
 } from '../WABinary'
 import { aesDecryptGCM, hmacSign } from './crypto'
-import { decryptMessageEdit, MESSAGE_EDIT_LABELS } from './secret-edit'
+import { decryptMessageEdit } from './secret-edit'
 import { getKeyAuthor, toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
 import type { ILogger } from './logger'
@@ -641,52 +641,37 @@ const processMessage = async (
 			} else {
 				try {
 					const meIdNormalised = jidNormalizedUser(meId)
-					// Resolve a key's author as a non-AD PN jid (whatsmeow uses
-					// ToNonAD PN). fromMe -> our own jid; group -> participant;
-					// 1:1 -> remoteJid; LID -> mapped to PN.
-					const resolvePn = async (
-						k: proto.IMessageKey
-					): Promise<string> => {
-						if (k.fromMe) {
-							return meIdNormalised
-						}
-						const j = k.participant || k.remoteJid!
-						const pn = isLidUser(j)
-							? await signalRepository.lidMapping.getPNForLID(j)
-							: j
-						return jidNormalizedUser(pn!)
-					}
-					const editCreatorJid = await resolvePn(targetKey)
-					const editorJid = await resolvePn(message.key)
+					const meLid = creds.me?.lid
+						? jidNormalizedUser(creds.me.lid)
+						: undefined
+					// Self-edit: creator == editor == the edit sender. Whatsmeow signs
+					// with the sender's ToNonAD jid AS-IS (LID stays LID). Offer the
+					// available candidates; AES-GCM's auth tag selects the right one.
+					const authorCandidates = [
+						message.key.participant &&
+							jidNormalizedUser(message.key.participant),
+						message.key.participantAlt &&
+							jidNormalizedUser(message.key.participantAlt),
+						message.key.fromMe ? meLid : undefined,
+						message.key.fromMe ? meIdNormalised : undefined
+					].filter((j): j is string => !!j)
 					const editEncKey = targetMsg?.messageContextInfo?.messageSecret
 					if (!editEncKey) {
 						logger?.warn({ targetKey }, 'secret message edit: missing messageSecret for decryption')
 					} else {
 						const res = decryptMessageEdit(sec, {
 							editEncKey,
-							editCreatorJid,
 							editMsgId: targetKey.id,
-							editorJid
+							authorCandidates
 						})
 						if (!res) {
 							logger?.warn(
-								{
-									targetKey,
-									editMsgId: targetKey.id,
-									editCreatorJid,
-									editorJid,
-									meIdNormalised,
-									editEncKeyB64: Buffer.from(editEncKey).toString('base64'),
-									encPayloadB64: Buffer.from(sec.encPayload!).toString('base64'),
-									encIvB64: Buffer.from(sec.encIv!).toString('base64'),
-									msgKey: message.key,
-									triedLabels: MESSAGE_EDIT_LABELS
-								},
-								'secret message edit: no label candidate authenticated; DIAG'
+								{ targetKey, authorCandidates },
+								'secret message edit: could not decrypt (no author candidate authenticated)'
 							)
 						} else {
 							logger?.info(
-								{ targetKey, label: res.label },
+								{ targetKey, author: res.author },
 								'secret message edit: decrypted, emitting messages.update'
 							)
 							ev.emit('messages.update', [

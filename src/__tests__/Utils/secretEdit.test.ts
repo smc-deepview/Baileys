@@ -3,70 +3,62 @@ import { proto } from '../../../WAProto/index.js'
 import { aesEncryptGCM, hmacSign } from '../../Utils/crypto'
 import { decryptMessageEdit } from '../../Utils/secret-edit'
 
-// Round-trip: encrypt an edited message with the SAME secret-message derivation
-// the decryptor expects (label 'Message Edit'), then assert decryptMessageEdit
-// recovers it and reports the matching label. Proves the crypto plumbing
-// (HMAC key derivation + AES-GCM + proto encode/decode) inverts correctly.
-// NOTE: validates the *plumbing*, not that 'Message Edit' is WhatsApp's real
-// label — that is confirmed empirically on canary against a live edit.
-
+// Encrypt an edit with the verified MESSAGE_EDIT scheme (creator == editor ==
+// author, label "Message Edit", EMPTY AAD), then assert decryptMessageEdit
+// recovers it and picks the right author from the candidate list. Scheme was
+// confirmed offline against live payloads (whatsmeow msgsecret.go).
 const encryptEdit = (
 	plaintext: Uint8Array,
-	{
-		msgId,
-		creatorJid,
-		editorJid,
-		secret,
-		label
-	}: { msgId: string; creatorJid: string; editorJid: string; secret: Uint8Array; label: string }
+	{ msgId, author, secret }: { msgId: string; author: string; secret: Uint8Array }
 ) => {
 	const key0 = hmacSign(secret, new Uint8Array(32), 'sha256')
 	const sign = Buffer.concat([
 		Buffer.from(msgId),
-		Buffer.from(creatorJid),
-		Buffer.from(editorJid),
-		Buffer.from(label),
+		Buffer.from(author),
+		Buffer.from(author),
+		Buffer.from('Message Edit'),
 		new Uint8Array([1])
 	])
 	const decKey = hmacSign(sign, key0, 'sha256')
 	const iv = randomBytes(12)
-	const aad = Buffer.alloc(0) // MESSAGE_EDIT authenticates over empty AAD
-	const encPayload = aesEncryptGCM(plaintext, decKey, iv, aad)
+	const encPayload = aesEncryptGCM(plaintext, decKey, iv, Buffer.alloc(0))
 	return { encPayload, encIv: iv }
 }
 
 const ctx = {
 	msgId: 'ORIG123',
-	creatorJid: '447441349787@s.whatsapp.net',
-	editorJid: '447344116028@s.whatsapp.net',
+	author: '208426307182752@lid',
 	secret: randomBytes(32)
 }
 
-test('decryptMessageEdit recovers an edit encrypted with the matching scheme', () => {
+test('decryptMessageEdit recovers an edit and selects the right author candidate', () => {
 	const plaintext = proto.Message.encode({ conversation: 'Nice!' }).finish()
-	const { encPayload, encIv } = encryptEdit(plaintext, { ...ctx, label: 'Message Edit' })
-
-	const res = decryptMessageEdit(
-		{ encPayload, encIv },
-		{ editEncKey: ctx.secret, editCreatorJid: ctx.creatorJid, editMsgId: ctx.msgId, editorJid: ctx.editorJid }
-	)
-
-	expect(res).toBeDefined()
-	expect(res!.label).toBe('Message Edit')
-	expect(res!.message.conversation).toBe('Nice!')
-})
-
-test('decryptMessageEdit returns undefined when the secret is wrong (GCM auth fails)', () => {
-	const plaintext = proto.Message.encode({ conversation: 'Nice!' }).finish()
-	const { encPayload, encIv } = encryptEdit(plaintext, { ...ctx, label: 'Message Edit' })
+	const { encPayload, encIv } = encryptEdit(plaintext, ctx)
 
 	const res = decryptMessageEdit(
 		{ encPayload, encIv },
 		{
-			editEncKey: randomBytes(32),
-			editCreatorJid: ctx.creatorJid,
 			editMsgId: ctx.msgId,
-			editorJid: ctx.editorJid
+			editEncKey: ctx.secret,
+			authorCandidates: ['447736318413@s.whatsapp.net', ctx.author]
+		}
+	)
+
+	expect(res).toBeDefined()
+	expect(res!.author).toBe(ctx.author)
+	expect(res!.message.conversation).toBe('Nice!')
+})
+
+test('decryptMessageEdit returns undefined when no candidate matches', () => {
+	const plaintext = proto.Message.encode({ conversation: 'Nice!' }).finish()
+	const { encPayload, encIv } = encryptEdit(plaintext, ctx)
+
+	const res = decryptMessageEdit(
+		{ encPayload, encIv },
+		{
+			editMsgId: ctx.msgId,
+			editEncKey: ctx.secret,
+			authorCandidates: ['nobody@lid']
 		}
 	)
 

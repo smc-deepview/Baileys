@@ -2,46 +2,52 @@ import { proto } from '../../WAProto/index.js'
 import { aesDecryptGCM, hmacSign } from './crypto'
 
 export type MessageEditContext = {
-	editCreatorJid: string
 	editMsgId: string
 	editEncKey: Uint8Array
-	editorJid: string
+	// Candidate author jids to try in the sign (creator == editor for a self-edit).
+	// Whatsmeow uses the message sender's ToNonAD jid AS-IS (LID stays LID, not PN),
+	// so the right candidate is usually the edit sender's @lid. We try the available
+	// candidates (lid, pn, self) and let AES-GCM's auth tag pick the correct one.
+	authorCandidates: string[]
 }
 
-// WhatsApp can deliver a message edit as a `secretEncryptedMessage`
-// (secretEncType MESSAGE_EDIT): the new content is AES-GCM encrypted with a key
-// derived from the ORIGINAL (target) message's messageContextInfo.messageSecret,
-// mirroring the poll-vote / event-response secret scheme. Upstream Baileys has
-// no decryptor for this — this is a deepview addition.
-//
-// The HMAC `label` is not documented; we try the plausible candidates and let
-// AES-GCM's auth tag be the oracle: a wrong label yields the wrong key and the
-// GCM tag fails (aesDecryptGCM throws), so only the correct label returns bytes.
-export const MESSAGE_EDIT_LABELS = ['Message Edit', 'Edit', 'Comment']
+// WhatsApp delivers a message edit as a `secretEncryptedMessage`
+// (secretEncType MESSAGE_EDIT): the new content is AES-256-GCM encrypted with a
+// key derived (HKDF-SHA256 == the poll/event HMAC chain) from the ORIGINAL
+// (target) message's messageContextInfo.messageSecret. Verified scheme:
+//   key0   = HMAC-SHA256(key=zeros(32), data=messageSecret)
+//   sign   = msgId || authorJid || authorJid || "Message Edit" || 0x01
+//   decKey = HMAC-SHA256(key=key0, data=sign)
+//   aad    = <empty>
+//   plaintext = AES-256-GCM(encPayload, decKey, encIv, aad)
+// (Ref: whatsmeow msgsecret.go; verified offline against live payloads.)
+const MESSAGE_EDIT_LABEL = 'Message Edit'
 
 export function decryptMessageEdit(
 	{ encPayload, encIv }: proto.Message.ISecretEncryptedMessage,
-	{ editCreatorJid, editMsgId, editEncKey, editorJid }: MessageEditContext
-): { message: proto.IMessage; label: string } | undefined {
+	{ editMsgId, editEncKey, authorCandidates }: MessageEditContext
+): { message: proto.IMessage; author: string } | undefined {
 	const key0 = hmacSign(editEncKey, new Uint8Array(32), 'sha256')
-	// MESSAGE_EDIT (like Enc Comment/Reaction/Event-Edit) authenticates over an
-	// EMPTY AAD — unlike Poll Vote / Event Response which use `msgId\x00actor`.
-	// (Ref: whatsmeow msgsecret.go generateMsgSecretKey AAD switch.)
 	const aad = Buffer.alloc(0)
-	for (const label of MESSAGE_EDIT_LABELS) {
+	const seen = new Set<string>()
+	for (const author of authorCandidates) {
+		if (!author || seen.has(author)) {
+			continue
+		}
+		seen.add(author)
 		try {
 			const sign = Buffer.concat([
 				toBinary(editMsgId),
-				toBinary(editCreatorJid),
-				toBinary(editorJid),
-				toBinary(label),
+				toBinary(author),
+				toBinary(author),
+				toBinary(MESSAGE_EDIT_LABEL),
 				new Uint8Array([1])
 			])
 			const decKey = hmacSign(sign, key0, 'sha256')
 			const decrypted = aesDecryptGCM(encPayload!, decKey, encIv!, aad)
-			return { message: proto.Message.decode(decrypted), label }
+			return { message: proto.Message.decode(decrypted), author }
 		} catch {
-			// wrong label -> GCM auth fails; try next candidate
+			// wrong author -> GCM auth fails; try next candidate
 		}
 	}
 	return undefined
