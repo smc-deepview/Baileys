@@ -641,15 +641,23 @@ const processMessage = async (
 			} else {
 				try {
 					const meIdNormalised = jidNormalizedUser(meId)
-					const creatorKey = targetKey.participant || targetKey.remoteJid!
-					const creatorPn = isLidUser(creatorKey)
-						? await signalRepository.lidMapping.getPNForLID(creatorKey)
-						: creatorKey
-					const editCreatorJid = getKeyAuthor(
-						{ remoteJid: jidNormalizedUser(creatorPn!), fromMe: meIdNormalised === creatorPn },
-						meIdNormalised
-					)
-					const editorJid = getKeyAuthor(message.key, meIdNormalised)
+					// Resolve a key's author as a non-AD PN jid (whatsmeow uses
+					// ToNonAD PN). fromMe -> our own jid; group -> participant;
+					// 1:1 -> remoteJid; LID -> mapped to PN.
+					const resolvePn = async (
+						k: proto.IMessageKey
+					): Promise<string> => {
+						if (k.fromMe) {
+							return meIdNormalised
+						}
+						const j = k.participant || k.remoteJid!
+						const pn = isLidUser(j)
+							? await signalRepository.lidMapping.getPNForLID(j)
+							: j
+						return jidNormalizedUser(pn!)
+					}
+					const editCreatorJid = await resolvePn(targetKey)
+					const editorJid = await resolvePn(message.key)
 					const editEncKey = targetMsg?.messageContextInfo?.messageSecret
 					if (!editEncKey) {
 						logger?.warn({ targetKey }, 'secret message edit: missing messageSecret for decryption')
@@ -662,8 +670,19 @@ const processMessage = async (
 						})
 						if (!res) {
 							logger?.warn(
-								{ targetKey, triedLabels: MESSAGE_EDIT_LABELS },
-								'secret message edit: no label candidate authenticated; scheme needs revision'
+								{
+									targetKey,
+									editMsgId: targetKey.id,
+									editCreatorJid,
+									editorJid,
+									meIdNormalised,
+									editEncKeyB64: Buffer.from(editEncKey).toString('base64'),
+									encPayloadB64: Buffer.from(sec.encPayload!).toString('base64'),
+									encIvB64: Buffer.from(sec.encIv!).toString('base64'),
+									msgKey: message.key,
+									triedLabels: MESSAGE_EDIT_LABELS
+								},
+								'secret message edit: no label candidate authenticated; DIAG'
 							)
 						} else {
 							logger?.info(
