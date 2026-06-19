@@ -24,7 +24,10 @@ export function decryptMessageEdit(
 	{ editCreatorJid, editMsgId, editEncKey, editorJid }: MessageEditContext
 ): { message: proto.IMessage; label: string } | undefined {
 	const key0 = hmacSign(editEncKey, new Uint8Array(32), 'sha256')
-	const aad = Buffer.concat([toBinary(editMsgId), Buffer.from([0]), toBinary(editorJid)])
+	// MESSAGE_EDIT (like Enc Comment/Reaction/Event-Edit) authenticates over an
+	// EMPTY AAD — unlike Poll Vote / Event Response which use `msgId\x00actor`.
+	// (Ref: whatsmeow msgsecret.go generateMsgSecretKey AAD switch.)
+	const aad = Buffer.alloc(0)
 	for (const label of MESSAGE_EDIT_LABELS) {
 		try {
 			const sign = Buffer.concat([

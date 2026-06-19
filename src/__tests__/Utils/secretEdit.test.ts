@@ -30,7 +30,7 @@ const encryptEdit = (
 	])
 	const decKey = hmacSign(sign, key0, 'sha256')
 	const iv = randomBytes(12)
-	const aad = Buffer.from(`${msgId}\u0000${editorJid}`)
+	const aad = Buffer.alloc(0) // MESSAGE_EDIT authenticates over empty AAD
 	const encPayload = aesEncryptGCM(plaintext, decKey, iv, aad)
 	return { encPayload, encIv: iv }
 }
