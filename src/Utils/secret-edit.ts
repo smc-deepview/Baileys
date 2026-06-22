@@ -1,4 +1,11 @@
 import { proto } from '../../WAProto/index.js'
+import type { WAMessageKey } from '../Types'
+import {
+	isJidBroadcast,
+	isJidGroup,
+	isJidStatusBroadcast,
+	jidNormalizedUser
+} from '../WABinary'
 import { aesDecryptGCM, hmacSign } from './crypto'
 
 export type MessageEditContext = {
@@ -55,4 +62,48 @@ export function decryptMessageEdit(
 	function toBinary(txt: string) {
 		return Buffer.from(txt)
 	}
+}
+
+// Build the ordered list of candidate author jids to try when decrypting a
+// secret-encrypted message edit. WhatsApp signs the edit with the message
+// CREATOR's jid AS-IS (LID stays LID); since you can only edit your OWN
+// messages, creator == editor. We can't always tell which jid that is up
+// front, so we offer every plausible author and let AES-GCM's auth tag select
+// the correct one (wrong candidates fail the tag — no false positives).
+export function buildEditAuthorCandidates(
+	key: Pick<
+		WAMessageKey,
+		'participant' | 'participantAlt' | 'remoteJid' | 'fromMe'
+	>,
+	self: { meLid?: string; meId?: string }
+): string[] {
+	// In a 1:1 chat there is no `participant`; the sender is the chat's
+	// remoteJid (used for a peer-edited DM message). Exclude groups/broadcast.
+	const remoteJid = key.remoteJid
+	const dmPeer =
+		remoteJid &&
+		!isJidGroup(remoteJid) &&
+		!isJidBroadcast(remoteJid) &&
+		!isJidStatusBroadcast(remoteJid)
+			? jidNormalizedUser(remoteJid)
+			: undefined
+	const raw = [
+		key.participant && jidNormalizedUser(key.participant),
+		key.participantAlt && jidNormalizedUser(key.participantAlt),
+		// A self-edit's author is our own LID/PN regardless of the stanza's
+		// fromMe flag, which a 1:1 self-edit does not reliably set — offer it
+		// unconditionally (wrong candidates fail the GCM tag).
+		self.meLid,
+		self.meId,
+		dmPeer
+	]
+	const seen = new Set<string>()
+	const out: string[] = []
+	for (const c of raw) {
+		if (c && !seen.has(c)) {
+			seen.add(c)
+			out.push(c)
+		}
+	}
+	return out
 }

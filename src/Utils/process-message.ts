@@ -31,7 +31,7 @@ import {
 	jidNormalizedUser
 } from '../WABinary'
 import { aesDecryptGCM, hmacSign } from './crypto'
-import { decryptMessageEdit } from './secret-edit'
+import { buildEditAuthorCandidates, decryptMessageEdit } from './secret-edit'
 import { getKeyAuthor, toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
 import type { ILogger } from './logger'
@@ -647,14 +647,10 @@ const processMessage = async (
 					// Self-edit: creator == editor == the edit sender. Whatsmeow signs
 					// with the sender's ToNonAD jid AS-IS (LID stays LID). Offer the
 					// available candidates; AES-GCM's auth tag selects the right one.
-					const authorCandidates = [
-						message.key.participant &&
-							jidNormalizedUser(message.key.participant),
-						message.key.participantAlt &&
-							jidNormalizedUser(message.key.participantAlt),
-						message.key.fromMe ? meLid : undefined,
-						message.key.fromMe ? meIdNormalised : undefined
-					].filter((j): j is string => !!j)
+					const authorCandidates = buildEditAuthorCandidates(message.key, {
+						meLid,
+						meId: meIdNormalised
+					})
 					const editEncKey = targetMsg?.messageContextInfo?.messageSecret
 					if (!editEncKey) {
 						logger?.warn({ targetKey }, 'secret message edit: missing messageSecret for decryption')
