@@ -47,6 +47,7 @@ import {
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
+	normalizeMessageContent,
 	SERVER_ERROR_CODES,
 	toNumber,
 	unixTimestampSeconds,
@@ -1725,49 +1726,43 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			await messageMutex.mutex(async () => {
 				await decrypt()
 
-				// TEMP DIAGNOSTIC (Wall B): dump the RAW decoded structure (field
-				// names + value TYPES only — bytes(N) for binary, no content) of
-				// self-sent 1:1 messages, right after decrypt and before any
-				// normalization, to see whether the wire payload carries
-				// messageContextInfo.messageSecret or a plaintext deviceSentMessage
-				// edit (both lost by the time wa-node sees the message).
+				// Reactive 1:1 edit recovery. WhatsApp delivers a message edit as a
+				// secret-encrypted message but does NOT give the sender's companion
+				// the original 1:1 message's messageSecret, so we can't decrypt the
+				// edit here (groups are unaffected — their secret IS delivered). Ask
+				// our own primary device to re-send the edit
+				// (PeerDataOperation PLACEHOLDER_MESSAGE_RESEND); the phone returns it
+				// as a plaintext protocolMessage edit that flows through normal
+				// capture. Fires ONLY when the secret is genuinely missing (so it
+				// can't double with a successful decrypt) and is deduped by
+				// placeholderResendCache.
 				try {
+					const sec = normalizeMessageContent(msg.message)?.secretEncryptedMessage
 					if (
-						msg.key?.fromMe &&
-						msg.key?.remoteJid &&
-						!msg.key.remoteJid.endsWith('@g.us')
+						sec?.secretEncType ===
+							proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT &&
+						sec.targetMessageKey?.id &&
+						msg.key?.id
 					) {
-						const shape = (o: any, d = 0): any => {
-							if (o == null) {
-								return o === null ? null : 'undefined'
-							}
-							if (o instanceof Uint8Array) {
-								return `bytes(${o.length})`
-							}
-							if (Array.isArray(o)) {
-								return o.length ? [shape(o[0], d + 1)] : []
-							}
-							if (typeof o === 'object' && d <= 5) {
-								const r: Record<string, unknown> = {}
-								for (const k of Object.keys(o)) {
-									r[k] = shape((o as Record<string, unknown>)[k], d + 1)
-								}
-								return r
-							}
-							return typeof o
+						const targetMsg = await getMessage(sec.targetMessageKey)
+						if (!targetMsg?.messageContextInfo?.messageSecret) {
+							logger.info(
+								{ editKey: msg.key, targetKey: sec.targetMessageKey },
+								'secret 1:1 edit undecryptable — requesting placeholder resend of the edit'
+							)
+							requestPlaceholderResend(msg.key).catch(err =>
+								logger.warn(
+									{ err: (err as Error)?.message },
+									'placeholder resend for secret edit failed'
+								)
+							)
 						}
-						logger.info(
-							{
-								id: msg.key.id,
-								remoteJid: msg.key.remoteJid,
-								category,
-								shape: shape(msg.message)
-							},
-							'wallB raw-decode'
-						)
 					}
 				} catch (e) {
-					logger.info({ err: (e as Error)?.message }, 'wallB raw-decode error')
+					logger.warn(
+						{ err: (e as Error)?.message },
+						'secret-edit resend check failed'
+					)
 				}
 
 				if (msg.key?.remoteJid && msg.key?.id && msg.message && messageRetryManager) {
