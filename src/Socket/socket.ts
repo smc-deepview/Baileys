@@ -40,6 +40,7 @@ import {
 	getNextPreKeysNode,
 	makeEventBuffer,
 	makeNoiseHandler,
+	pairCodeKeepAliveMs,
 	promiseTimeout,
 	signedKeyPair,
 	xmppSignedPreKey
@@ -880,6 +881,11 @@ export const makeSocket = (config: SocketConfig) => {
 		const identityKeyB64 = Buffer.from(creds.signedIdentityKey.public).toString('base64')
 		const advB64 = creds.advSecretKey
 
+		// Max lifetime for a pair-CODE ("link with phone number") session. The
+		// QR-ref cycle (scan flow) exhausts at ~2:40, but the code stays valid
+		// server-side longer, so keep the socket alive up to this cap.
+		const PAIRING_CODE_MAX_LIFETIME_MS = 5 * 60 * 1000
+		const pairStartedAt = Date.now()
 		let qrMs = qrTimeout || 60_000 // time to let a QR live
 		const genPairQR = () => {
 			if (!ws.isOpen) {
@@ -888,6 +894,22 @@ export const makeSocket = (config: SocketConfig) => {
 
 			const refNode = refNodes.shift()
 			if (!refNode) {
+				// QR refs exhausted. In the pair-CODE flow the user types a code
+				// rather than scanning, and WhatsApp keeps it valid beyond the QR-ref
+				// cycle — keep the socket alive up to the code's max lifetime instead
+				// of ending here.
+				const keepAliveMs = pairCodeKeepAliveMs(
+					!!creds.pairingCode,
+					pairStartedAt,
+					Date.now(),
+					PAIRING_CODE_MAX_LIFETIME_MS
+				)
+				if (keepAliveMs !== null) {
+					qrTimer = setTimeout(() => {
+						void end(new Boom('pairing code lifetime exceeded', { statusCode: DisconnectReason.timedOut }))
+					}, keepAliveMs)
+					return
+				}
 				void end(new Boom('QR refs attempts ended', { statusCode: DisconnectReason.timedOut }))
 				return
 			}
