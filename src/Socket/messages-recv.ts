@@ -28,6 +28,7 @@ import {
 	aesDecryptCTR,
 	aesEncryptGCM,
 	cleanMessage,
+	resolveSenderReceiptParticipant,
 	Curve,
 	decodeMediaRetryNode,
 	decodeMessageNode,
@@ -82,6 +83,7 @@ import {
 	isLidUser,
 	isPnUser,
 	jidDecode,
+	jidEncode,
 	jidNormalizedUser,
 	type JidWithDevice,
 	S_WHATSAPP_NET
@@ -1893,7 +1895,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 							type = 'sender'
 							// need to specially handle this case
 							if (isLidUser(msg.key.remoteJid!) || isLidUser(msg.key.remoteJidAlt)) {
-								participant = author // TODO: investigate sending receipts to LIDs and not PNs
+								const altJid = node.attrs.participant_pn || node.attrs.sender_pn || msg.key.remoteJidAlt
+								participant = resolveSenderReceiptParticipant(author, altJid)
 							}
 						} else if (!sendActiveReceipts) {
 							type = 'inactive'

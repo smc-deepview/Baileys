@@ -137,6 +137,14 @@ export const cleanMessage = (message: WAMessage, meId: string, meLid: string) =>
 		message.key.participant = jidNormalizedUser(message.key.participant!)
 	}
 
+	if (message.key.remoteJidAlt) {
+		message.key.remoteJidAlt = jidNormalizedUser(message.key.remoteJidAlt)
+	}
+
+	if (message.key.participantAlt) {
+		message.key.participantAlt = jidNormalizedUser(message.key.participantAlt)
+	}
+
 	const content = normalizeMessageContent(message.message)
 	// if the message has a reaction, ensure fromMe & remoteJid are from our perspective
 	if (content?.reactionMessage) {
@@ -849,6 +857,18 @@ const processMessage = async (
 	if (Object.keys(chat).length > 1) {
 		ev.emit('chats.update', [chat])
 	}
+}
+
+export const resolveSenderReceiptParticipant = (author: string | undefined, altJid: string | undefined): string | undefined => {
+	if (author && isLidUser(author) && jidDecode(author)?.device === undefined) {
+		if (altJid) {
+			const altDevice = jidDecode(altJid)?.device
+			if (typeof altDevice === 'number') {
+				return jidEncode(jidDecode(author)!.user, 'lid', altDevice)
+			}
+		}
+	}
+	return author
 }
 
 export default processMessage

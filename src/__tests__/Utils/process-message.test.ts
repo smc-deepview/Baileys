@@ -1,5 +1,5 @@
 import type { WAMessage } from '../../Types'
-import { cleanMessage, getChatId } from '../../Utils/process-message'
+import { cleanMessage, getChatId, resolveSenderReceiptParticipant } from '../../Utils/process-message'
 
 const createBaseMessage = (key: Partial<WAMessage['key']>, message?: Partial<WAMessage['message']>): WAMessage => {
 	return {
@@ -23,13 +23,17 @@ describe('cleanMessage', () => {
 		it('should correctly normalize a standard phone number JID with a device', () => {
 			const message = createBaseMessage({
 				remoteJid: '1234567890:15@s.whatsapp.net',
-				participant: '9876543210:5@s.whatsapp.net'
+				participant: '9876543210:5@s.whatsapp.net',
+				remoteJidAlt: '1234567890:15@s.whatsapp.net',
+				participantAlt: '9876543210:5@s.whatsapp.net'
 			})
 
 			cleanMessage(message, meId, meLid)
 
 			expect(message.key.remoteJid).toBe('1234567890@s.whatsapp.net')
 			expect(message.key.participant).toBe('9876543210@s.whatsapp.net')
+			expect(message.key.remoteJidAlt).toBe('1234567890@s.whatsapp.net')
+			expect(message.key.participantAlt).toBe('9876543210@s.whatsapp.net')
 		})
 
 		it('should not modify a group JID', () => {
@@ -185,5 +189,23 @@ describe('getChatId', () => {
 
 	it('throws when broadcast key has no participant', () => {
 		expect(() => getChatId({ remoteJid: '12345@broadcast', fromMe: false, id: 'X' })).toThrow(/missing participant/)
+	})
+})
+
+describe('resolveSenderReceiptParticipant', () => {
+	it('maps author to companion device when author is bare LID and altJid has device', () => {
+		expect(resolveSenderReceiptParticipant('218107197030640@lid', '18324556379:75@s.whatsapp.net')).toBe('218107197030640:75@lid')
+	})
+
+	it('preserves author when author already has a device', () => {
+		expect(resolveSenderReceiptParticipant('218107197030640:76@lid', '18324556379:75@s.whatsapp.net')).toBe('218107197030640:76@lid')
+	})
+
+	it('preserves author when author is a PN JID', () => {
+		expect(resolveSenderReceiptParticipant('18324556379@s.whatsapp.net', '18324556379:75@s.whatsapp.net')).toBe('18324556379@s.whatsapp.net')
+	})
+
+	it('preserves author when altJid has no device', () => {
+		expect(resolveSenderReceiptParticipant('218107197030640@lid', '18324556379@s.whatsapp.net')).toBe('218107197030640@lid')
 	})
 })
