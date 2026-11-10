@@ -1,7 +1,7 @@
 {
   "name": "dv-baileys",
   "type": "module",
-  "version": "7.0.0-rc11-dv.11",
+  "version": "7.0.0-rc14-dv.1",
   "description": "A WebSockets library for interacting with WhatsApp Web",
   "keywords": [
     "whatsapp",
