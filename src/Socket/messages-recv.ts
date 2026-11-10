@@ -1725,7 +1725,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				}
 			}
 
-			await messageMutex.mutex(msg.key?.remoteJid ?? '__no-chat__', async () => {
+			const chatKey = msg.key?.remoteJid || node.attrs.from || '__default__';
+			await messageMutex.mutex(chatKey, async () => {
 				await decrypt()
 
 				// Reactive 1:1 edit recovery. WhatsApp delivers a message edit as a
