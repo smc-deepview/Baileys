@@ -45,7 +45,7 @@ import {
 	newLTHashState,
 	processSyncAction
 } from '../Utils'
-import { makeMutex } from '../Utils/make-mutex'
+import { makeKeyedMutex, makeMutex } from '../Utils/make-mutex'
 import processMessage from '../Utils/process-message'
 import { buildTcTokenFromJid } from '../Utils/tc-token-utils'
 import {
@@ -97,7 +97,8 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		signalRepository,
 		onUnexpectedError,
 		sendUnifiedSession,
-		registerSocketEndHandler
+		registerSocketEndHandler,
+		getMediaHost
 	} = sock
 
 	const getLIDForPN = signalRepository.lidMapping.getLIDForPN.bind(signalRepository.lidMapping)
@@ -117,13 +118,13 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	let syncState: SyncState = SyncState.Connecting
 
 	/** this mutex ensures that messages are processed in order */
-	const messageMutex = makeMutex()
+	const messageMutex = makeKeyedMutex()
 
 	/** this mutex ensures that receipts are processed in order */
-	const receiptMutex = makeMutex()
+	const receiptMutex = makeKeyedMutex()
 
 	/** this mutex ensures that app state patches are processed in order */
-	const appStatePatchMutex = makeMutex()
+	const appStatePatchMutex = makeKeyedMutex()
 
 	/** this mutex ensures that notifications are processed in order */
 	const notificationMutex = makeMutex()
@@ -645,7 +646,10 @@ export const makeChatsSocket = (config: SocketConfig) => {
 					})
 
 					// extract from binary node
-					const decoded = await extractSyncdPatches(result, config?.options)
+					// Stage 11: route the external-blob download (for collections too
+					// large to inline) through the socket's `media_conn` host so the
+					// app-state sync hits the same shard as the upload path.
+					const decoded = await extractSyncdPatches(result, config?.options, getMediaHost())
 					for (const key in decoded) {
 						const name = key as WAPatchName
 						const { patches, hasMorePatches, snapshot } = decoded[name]
@@ -677,7 +681,8 @@ export const makeChatsSocket = (config: SocketConfig) => {
 									config.options,
 									initialVersionMap[name],
 									logger,
-									appStateMacVerification.patch
+									appStateMacVerification.patch,
+									getMediaHost()
 								)
 
 								await authState.keys.set({ 'app-state-sync-version': { [name]: newState } })
@@ -918,7 +923,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		let initial: LTHashState
 		let encodeResult: { patch: proto.ISyncdPatch; state: LTHashState }
 
-		await appStatePatchMutex.mutex(async () => {
+		await appStatePatchMutex.mutex(name, async () => {
 			await authState.keys.transaction(async () => {
 				logger.debug({ patch: patchCreate }, 'applying app patch')
 
@@ -976,7 +981,9 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				getAppStateSyncKey,
 				config.options,
 				undefined,
-				logger
+				logger,
+				undefined,
+				getMediaHost()
 			)
 			for (const key in mutationMap) {
 				onMutation(mutationMap[key]!)
@@ -1326,7 +1333,10 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				keyStore: authState.keys,
 				logger,
 				options: config.options,
-				getMessage
+				getMessage,
+				// Stage 11: thread the per-socket media-CDN host into
+				// history-sync downloads inside processMessage.
+				getMediaHost
 			})
 		])
 

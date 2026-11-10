@@ -47,6 +47,13 @@ type ProcessMessageContext = {
 	options: RequestInit
 	signalRepository: SignalRepositoryWithLIDStore
 	getMessage: SocketConfig['getMessage']
+	/**
+	 * Optional getter for the per-socket `media_conn` CDN host. When
+	 * provided, history-sync downloads route through it; otherwise they
+	 * fall back to `DEF_MEDIA_HOST` and may 400 in regions WhatsApp
+	 * shards to a non-default CDN.
+	 */
+	getMediaHost?: () => string
 }
 
 const REAL_MSG_STUB_TYPES = new Set([
@@ -310,7 +317,8 @@ const processMessage = async (
 		keyStore,
 		logger,
 		options,
-		getMessage
+		getMessage,
+		getMediaHost
 	}: ProcessMessageContext
 ) => {
 	const meId = creds.me!.id
@@ -405,7 +413,7 @@ const processMessage = async (
 						})
 					}
 
-					const data = await downloadAndProcessHistorySyncNotification(histNotification, options, logger)
+					const data = await downloadAndProcessHistorySyncNotification(histNotification, options, logger, getMediaHost?.())
 
 					if (data.lidPnMappings?.length) {
 						logger?.debug({ count: data.lidPnMappings.length }, 'processing LID-PN mappings from history sync')
