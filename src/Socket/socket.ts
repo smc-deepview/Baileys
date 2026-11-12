@@ -851,14 +851,8 @@ export const makeSocket = (config: SocketConfig) => {
 			throw new Error('Custom pairing code must be exactly 8 chars')
 		}
 
-		authState.creds.pairingCode = pairingCode
-
-		authState.creds.me = {
-			id: jidEncode(phoneNumber, 's.whatsapp.net'),
-			name: '~'
-		}
-		ev.emit('creds.update', authState.creds)
-		await sendNode({
+		const jid = jidEncode(phoneNumber, 's.whatsapp.net')
+		const iqNode: BinaryNode = {
 			tag: 'iq',
 			attrs: {
 				to: S_WHATSAPP_NET,
@@ -870,7 +864,7 @@ export const makeSocket = (config: SocketConfig) => {
 				{
 					tag: 'link_code_companion_reg',
 					attrs: {
-						jid: authState.creds.me.id,
+						jid,
 						stage: 'companion_hello',
 
 						should_show_push_notification: 'true'
@@ -879,7 +873,7 @@ export const makeSocket = (config: SocketConfig) => {
 						{
 							tag: 'link_code_pairing_wrapped_companion_ephemeral_pub',
 							attrs: {},
-							content: await generatePairingKey()
+							content: await generatePairingKey(pairingCode)
 						},
 						{
 							tag: 'companion_server_auth_key_pub',
@@ -904,14 +898,28 @@ export const makeSocket = (config: SocketConfig) => {
 					]
 				}
 			]
-		})
-		return authState.creds.pairingCode
+		}
+
+		const res = await query(iqNode, 20_000)
+		if (!res) {
+			throw new Boom('Timed out waiting for companion_hello response', {
+				statusCode: DisconnectReason.timedOut
+			})
+		}
+
+		authState.creds.pairingCode = pairingCode
+		authState.creds.me = {
+			id: jid,
+			name: '~'
+		}
+		ev.emit('creds.update', authState.creds)
+		return pairingCode
 	}
 
-	async function generatePairingKey() {
+	async function generatePairingKey(pairingCode: string) {
 		const salt = randomBytes(32)
 		const randomIv = randomBytes(16)
-		const key = await derivePairingCodeKey(authState.creds.pairingCode!, salt)
+		const key = await derivePairingCodeKey(pairingCode, salt)
 		const ciphered = aesEncryptCTR(authState.creds.pairingEphemeralKeyPair.public, key, randomIv)
 		return Buffer.concat([salt, randomIv, ciphered])
 	}
